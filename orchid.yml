@@ -1,0 +1,25 @@
+environments:
+  dev:
+    remote_user: deploy
+    applications:
+      - name: app1
+        host: dev-host1.example.com
+        start_command: "./start_app1.sh"
+        stop_command: "./stop_app1.sh"
+        check_command: "./check_app1.sh"
+        check_interval: 5
+      - name: app2
+        host: dev-host2.example.com
+        start_command: "./start_app2.sh"
+        stop_command: "./stop_app2.sh"
+        check_command: "./check_app2.sh"
+        check_interval: 5
+  staging:
+    remote_user: deploy
+    applications:
+      - name: app3
+        host: staging-host1.example.com
+        start_command: "./start_app3.sh"
+        stop_command: "./stop_app3.sh"
+        check_command: "./check_app3.sh"
+        check_interval: 5
