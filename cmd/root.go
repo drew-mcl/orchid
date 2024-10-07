@@ -15,9 +15,11 @@ var (
 	env        string
 	dryRun     bool
 	rootCmd    = &cobra.Command{
-		Use:   "orchid",
-		Short: "Orchestrates on-premises applications for testing and deployment",
-		Long:  `A CLI tool to manage the lifecycle of on-premises applications with dependencies.`,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Use:           "orchid",
+		Short:         "Orchestrates on-premises applications for testing and deployment",
+		Long:          `A CLI tool to manage the lifecycle of on-premises applications with dependencies.`,
 	}
 )
 

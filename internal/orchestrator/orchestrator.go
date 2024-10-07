@@ -47,7 +47,7 @@ func NewOrchestrator(cfg *config.Config, sshFactory ssh.SSHFactory, environment 
 			}
 		}
 		flagPath := filepath.Join(flagDir, fmt.Sprintf("%s.flag", environment))
-		fm = NewFlagManager(flagPath)
+		fm = NewFlagManager(flagPath, environment)
 	}
 
 	return &Orchestrator{
@@ -61,18 +61,13 @@ func NewOrchestrator(cfg *config.Config, sshFactory ssh.SSHFactory, environment 
 	}, nil
 }
 
-// BringUp starts all applications in the specified environment.
 func (o *Orchestrator) BringUp(ctx context.Context) error {
 	if !o.dryRun {
 		if err := o.flagManager.Acquire(); err != nil {
 			slog.Error("Failed to acquire flag", "error", err, "flagPath", o.flagManager.flagPath)
 			return err
 		}
-		defer func() {
-			if err := o.flagManager.Release(); err != nil {
-				slog.Warn("Failed to release flag", "error", err, "flagPath", o.flagManager.flagPath)
-			}
-		}()
+		slog.Info("Flag acquired successfully", "flagPath", o.flagManager.flagPath)
 	} else {
 		slog.Info("[Dry-run] Skipping flag acquisition")
 	}
@@ -88,16 +83,26 @@ func (o *Orchestrator) BringUp(ctx context.Context) error {
 		go o.monitorApps(ctx)
 	}
 
+	anyAppsStarted := false // Track if any apps have been started
+
 	for _, app := range env.Applications {
 		select {
 		case <-ctx.Done():
 			slog.Warn("Bring up operation canceled")
+			if !anyAppsStarted && !o.dryRun {
+				if err := o.flagManager.Release(); err != nil {
+					slog.Warn("Failed to release flag during cancellation", "error", err, "flagPath", o.flagManager.flagPath)
+				} else {
+					slog.Info("Flag released due to cancellation", "flagPath", o.flagManager.flagPath)
+				}
+			}
 			return ctx.Err()
 		case err := <-o.monitorChan:
 			slog.Error("Application failed during bring up, initiating rollback", "error", err)
 			o.cancelFunc()
 			o.wg.Wait()
-			return o.rollback()
+			rollbackErr := o.rollback()
+			return rollbackErr
 		default:
 		}
 
@@ -106,7 +111,8 @@ func (o *Orchestrator) BringUp(ctx context.Context) error {
 			slog.Error("Failed to get SSH client", "host", app.Host, "error", err)
 			o.cancelFunc()
 			o.wg.Wait()
-			return o.rollback()
+			rollbackErr := o.rollback()
+			return rollbackErr
 		}
 
 		// Ensure the app is down by running the check command
@@ -125,7 +131,8 @@ func (o *Orchestrator) BringUp(ctx context.Context) error {
 					slog.Error("Failed to stop app before starting", "app", app.Name, "host", app.Host, "error", err)
 					o.cancelFunc()
 					o.wg.Wait()
-					return o.rollback()
+					rollbackErr := o.rollback()
+					return rollbackErr
 				}
 			} else {
 				slog.Info("[Dry-run] Would execute stop command", "command", app.StopCommand, "app", app.Name, "host", app.Host)
@@ -141,7 +148,8 @@ func (o *Orchestrator) BringUp(ctx context.Context) error {
 				slog.Error("Failed to start app", "app", app.Name, "host", app.Host, "error", err)
 				o.cancelFunc()
 				o.wg.Wait()
-				return o.rollback()
+				rollbackErr := o.rollback()
+				return rollbackErr
 			}
 		} else {
 			slog.Info("[Dry-run] Would execute start command", "command", app.StartCommand, "app", app.Name, "host", app.Host)
@@ -150,6 +158,7 @@ func (o *Orchestrator) BringUp(ctx context.Context) error {
 		o.mutex.Lock()
 		o.appStates[app.Name] = true
 		o.mutex.Unlock()
+		anyAppsStarted = true
 
 		// Wait for the check interval
 		time.Sleep(time.Duration(app.CheckInterval) * time.Second)
@@ -166,7 +175,8 @@ func (o *Orchestrator) BringUp(ctx context.Context) error {
 			slog.Error("App failed to start correctly", "app", app.Name, "host", app.Host, "error", err)
 			o.cancelFunc()
 			o.wg.Wait()
-			return o.rollback()
+			rollbackErr := o.rollback()
+			return rollbackErr
 		}
 
 		slog.Info("App started successfully", "app", app.Name, "host", app.Host)
@@ -180,7 +190,8 @@ func (o *Orchestrator) BringUp(ctx context.Context) error {
 				slog.Error("Application failed during bring up, initiating rollback", "error", err)
 				o.cancelFunc()
 				o.wg.Wait()
-				return o.rollback()
+				rollbackErr := o.rollback()
+				return rollbackErr
 			}
 		case <-time.After(2 * time.Second):
 		}
@@ -190,20 +201,12 @@ func (o *Orchestrator) BringUp(ctx context.Context) error {
 	return nil
 }
 
-// BringDown stops all applications in the specified environment.
+// BringDown stops all applications in the specified environment and releases the flag.
 func (o *Orchestrator) BringDown(ctx context.Context) error {
 	if !o.dryRun {
-		if err := o.flagManager.Acquire(); err != nil {
-			slog.Error("Failed to acquire flag", "error", err, "flagPath", o.flagManager.flagPath)
-			return err
-		}
-		defer func() {
-			if err := o.flagManager.Release(); err != nil {
-				slog.Warn("Failed to release flag", "error", err, "flagPath", o.flagManager.flagPath)
-			}
-		}()
+		// Do not defer the release here; release after successful stop
 	} else {
-		slog.Info("Dry-run mode: Skipping flag acquisition")
+		slog.Info("[Dry-run] Skipping flag release")
 	}
 
 	env := o.cfg.Environments[o.environment]
@@ -214,7 +217,7 @@ func (o *Orchestrator) BringDown(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			slog.Warn("Bring down operation canceled")
-			return ctx.Err()
+			return ctx.Err() // Do not release the flag here
 		default:
 		}
 
@@ -253,6 +256,17 @@ func (o *Orchestrator) BringDown(ctx context.Context) error {
 		o.mutex.Lock()
 		o.appStates[app.Name] = false
 		o.mutex.Unlock()
+	}
+
+	// Release the flag after bringing down all applications
+	if !o.dryRun {
+		if err := o.flagManager.Release(); err != nil {
+			slog.Warn("Failed to release flag during BringDown", "error", err, "flagPath", o.flagManager.flagPath)
+		} else {
+			slog.Info("Flag released successfully", "flagPath", o.flagManager.flagPath)
+		}
+	} else {
+		slog.Info("[Dry-run] Skipping flag release")
 	}
 
 	slog.Info("All applications stopped successfully")
@@ -343,5 +357,15 @@ func (o *Orchestrator) rollback() error {
 	}
 
 	slog.Info("Rollback process completed")
+
+	// Release the flag after rollback
+	if !o.dryRun {
+		if err := o.flagManager.Release(); err != nil {
+			slog.Warn("Failed to release flag during rollback", "error", err, "flagPath", o.flagManager.flagPath)
+		} else {
+			slog.Info("Flag released successfully during rollback", "flagPath", o.flagManager.flagPath)
+		}
+	}
+
 	return fmt.Errorf("rollback completed due to failure")
 }
