@@ -1,25 +1,72 @@
 environments:
   dev:
-    remote_user: deploy
-    applications:
-      - name: app1
-        host: dev-host1.example.com
-        start_command: "./start_app1.sh"
-        stop_command: "./stop_app1.sh"
-        check_command: "./check_app1.sh"
-        check_interval: 5
-      - name: app2
-        host: dev-host2.example.com
-        start_command: "./start_app2.sh"
-        stop_command: "./stop_app2.sh"
-        check_command: "./check_app2.sh"
-        check_interval: 5
+    # Global SSH defaults for the environment
+    ssh_defaults:
+      user: deployer
+      key: /path/to/default/key
+      timeout: 10s  # Optional SSH timeout setting
+    
+    # Host definitions - only need to specify values that differ from defaults
+    hosts:
+      app1: 
+        hostname: app1.dev.internal
+        # Uses default ssh_user and ssh_key
+      
+      app2:
+        hostname: app2.dev.internal
+        # Uses default ssh_user and ssh_key
+      
+      db1:
+        hostname: db1.dev.internal
+        ssh_user: postgres  # Override default user for this host
+        ssh_key: /path/to/special/db/key  # Override default key for this host
+    
+    sequence:
+      - name: "elasticsearch"
+        type: "dependency"
+        hosts: ["db1"]
+        start: "systemctl start elasticsearch"
+        check: "curl -f http://localhost:9200/_cluster/health"
+        stop: "systemctl stop elasticsearch"
+      
+      - name: "kafka-cluster"
+        type: "dependency"
+        hosts: ["app1", "app2"]
+        start: "systemctl start kafka"
+        check: "nc -z localhost 9092"
+        stop: "systemctl stop kafka"
+      
+      - name: "auth-service"
+        type: "application"
+        hosts: ["app1"]
+        start: "/opt/auth/start.sh"
+        check: "curl -f http://localhost:8080/health"
+        stop: "/opt/auth/stop.sh"
+
+      - name: "clear-file"
+        type: "command"
+        hosts: ["app1"]
+        run: "mv file1 /file/1/2/3"
+
+  qa:
+    ssh_defaults:
+      user: deployer
+      key: /path/to/qa/key
+    
+    hosts:
+      app1:
+        hostname: app1.qa.internal
+        # Uses default ssh_user and ssh_key
+      
+      monitor1:
+        hostname: monitor1.qa.internal
+        ssh_user: monitor  # Override default user
+    
+    sequence:
+      # QA sequence...
+      
   staging:
-    remote_user: deploy
-    applications:
-      - name: app3
-        host: staging-host1.example.com
-        start_command: "./start_app3.sh"
-        stop_command: "./stop_app3.sh"
-        check_command: "./check_app3.sh"
-        check_interval: 5
+    ssh_defaults:
+      user: deployer
+      key: /path/to/prod/key
+    # Similar structure for staging
